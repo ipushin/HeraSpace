@@ -4,7 +4,9 @@ from keras.layers import LSTM, TimeDistributed
 from keras.callbacks import Callback
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-
+import pandas as pd
+import numpy as np
+import pickle
 
 # Plotting loss and val_loss as function of epochs
 def plotting(history):
@@ -18,7 +20,7 @@ def plotting(history):
     plt.show()
 
 
-def stateful_cut(arr, batch_size=8, t_after_cut=15):
+def stateful_cut(arr, batch_size, t_after_cut):
     if len(arr.shape) != 3:
         # N: Independent sample size,
         # T: Time length,
@@ -116,35 +118,32 @@ def define_stateful_val_loss_class(inputs, outputs, batch_size, nb_cuts):
     return ValidationCallback
 
 
-def get_data(data_path=''):
+
+def get_data(data_path):
     df = pd.read_csv(data_path, index_col=[0])
-    df = dataset.dropna(subset=['Lat_7_days', 'Lon_7_days', 'CPUE_7_days']).sort_values('Date')
+    df = df.dropna(subset=['Lat_7_days', 'Lon_7_days', 'CPUE_7_days']).sort_values('Date')
     return df
 
 
-def data_initial_input_output():
-    dataset = get_data()
-
-    N = 16
-    T = 120
+def data_initial_input_output(df, N, T):
     round_end = 3840
 
     # Inputs
-    x1_f = dataset['Lat_7_days'].values[:round_end].reshape(2 * N, T)
-    x2_f = dataset['chl'].values[:round_end].reshape(2 * N, T)
-    x3_f = dataset['Lon_7_days'].values[:round_end].reshape(2 * N, T)
-    x4_f = dataset['thetao'].values[:round_end].reshape(2 * N, T)
+    x1_f = df['Lat_7_days'].values[:round_end].reshape(2 * N, T)
+    x2_f = df['chl'].values[:round_end].reshape(2 * N, T)
+    x3_f = df['Lon_7_days'].values[:round_end].reshape(2 * N, T)
+    x4_f = df['thetao'].values[:round_end].reshape(2 * N, T)
 
     # Outputs
-    y1_f = dataset['CPUE_number_per_hour'].values[:round_end].reshape(2 * N, T)
-    y2_f = dataset['Lat'].values[:round_end].reshape(2 * N, T)
-    y3_f = dataset['Lon'].values[:round_end].reshape(2 * N, T)
+    y1_f = df['CPUE_number_per_hour'].values[:round_end].reshape(2 * N, T)
+    y2_f = df['Lat'].values[:round_end].reshape(2 * N, T)
+    y3_f = df['Lon'].values[:round_end].reshape(2 * N, T)
 
     return x1_f, x2_f, x3_f, x4_f, y1_f, y2_f, y3_f
 
 
-def train_test_data():
-    x1_f, x2_f, x3_f, x4_f, y1_f, y2_f, y3_f = data_initial_input_output()
+def train_test_data(df, N, T):
+    x1_f, x2_f, x3_f, x4_f, y1_f, y2_f, y3_f = data_initial_input_output(df, N, T)
 
     # Training/test sets
     x1_train_f, x2_train_f, x3_train_f, x4_train_f = [x[0:N] for x in [x1_f, x2_f, x3_f, x4_f]]
@@ -179,20 +178,57 @@ def train_test_data():
     return x_train_f, x_test_f, y_train_f, y_test_f
 
 
-def model_input_otputs(batch_size=8, t_after_cut=15):
-    x_train_f, x_test_f, y_train_f, y_test_f = train_test_data()
-
+def model_input_otputs(df, N, T, batch_size, t_after_cut):
+    x_train_f, x_test_f, y_train_f, y_test_f = train_test_data(df, N, T)
     inputs, outputs, inputs_test, outputs_test = [stateful_cut(arr, batch_size, t_after_cut) for arr in \
                                                   [x_train_f, y_train_f, x_test_f, y_test_f]]
 
     return inputs, outputs, inputs_test, outputs_test
 
 
-def lstm_model(dim_in=4, dim_out=3, nb_units=100, batch_size=8):
+def lstm_model(batch_size, dim_in, dim_out):
     model = Sequential()
     model.add(LSTM(batch_input_shape=(batch_size, None, dim_in),
-                   return_sequences=True, units=nb_units, stateful=True))
+                   return_sequences=True, units=100, stateful=True))
     model.add(LSTM(30, activation='relu', return_sequences=True))
     model.add(TimeDistributed(Dense(activation='linear', units=dim_out)))
     model.compile(loss='mse', optimizer='rmsprop')
     return model
+
+
+def train_model(model, epochs, batch_size, N, T, t_after_cut, inputs, outputs, inputs_test, outputs_test):
+    # Model Training
+    nb_reset = int(N / batch_size)
+    nb_cuts = int(T / t_after_cut)
+    if nb_reset > 1:
+        ResetStatesCallback = define_reset_states_class(nb_cuts)
+        ValidationCallback = define_stateful_val_loss_class(inputs_test, outputs_test, batch_size, nb_cuts)
+        validation = ValidationCallback()
+        history = model.fit(inputs, outputs, epochs=epochs,
+                            batch_size=batch_size, shuffle=False,
+                            callbacks=[ResetStatesCallback(), validation])
+        history.history['val_loss'] = ValidationCallback.get_val_loss(validation)
+    else:
+        # If nb_reset = 1, we should reset states after each epoch.
+        # To improve computational speed, we can decide not to reinitialize states
+        # at all. Results are similar in this case.
+        # In the following line, states are not reinitialized at all:
+        history = model.fit(inputs, outputs, epochs=epochs,
+                            batch_size=batch_size, shuffle=False,
+                            validation_data=(inputs_test, outputs_test))
+    return model, history
+
+
+def predict(model, dim_in, dim_out, x_test_f, n):
+    # n = n # time series selected (between 0 and N-1)
+    model_stateless = Sequential()
+    model_stateless.add(LSTM(input_shape=(None, dim_in), return_sequences=True, units=100))
+    model_stateless.add(LSTM(30, activation='relu', return_sequences=True))
+    model_stateless.add(TimeDistributed(Dense(activation='linear', units=dim_out)))
+    model_stateless.compile(loss = 'mse', optimizer = 'rmsprop')
+    model_stateless.set_weights(model.get_weights())
+
+    ## Prediction of a new set
+    x = x_test_f[n]
+    y_hat = model_stateless.predict(np.array([x]))[0]
+    return y_hat
