@@ -6,10 +6,10 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import pandas as pd
 import numpy as np
-import pickle
 
-# Plotting loss and val_loss as function of epochs
+
 def plotting(history):
+    """Plots to visualise model performance. Plotting loss and val_loss as function of epochs"""
     plt.plot(history.history['loss'], color="red")
     plt.plot(history.history['val_loss'], color="blue")
     red_patch = mpatches.Patch(color='red', label='Training')
@@ -21,11 +21,9 @@ def plotting(history):
 
 
 def stateful_cut(arr, batch_size, t_after_cut):
+    """Helper function for stateful model"""
     if len(arr.shape) != 3:
-        # N: Independent sample size,
-        # T: Time length,
-        # m: Dimension
-        print("ERROR: please format arr as a (N, T, m) array.")
+        print("ERROR: please format arr as a (N, T, 3) array.")
 
     N = arr.shape[0]
     T = arr.shape[1]
@@ -44,15 +42,11 @@ def stateful_cut(arr, batch_size, t_after_cut):
     cut2 = [np.split(x, nb_cuts, axis=1) for x in cut1]
     cut3 = [np.concatenate(x) for x in cut2]
     cut4 = np.concatenate(cut3)
-
     return cut4
 
 
-##############################################################
-# Function to define 'Callback resetting model states' class #
-##############################################################
-# This callback will slow down computations.
 def define_reset_states_class(nb_cuts):
+    """Function to define 'Callback resetting model states' class"""
     class ResetStatesCallback(Callback):
         def __init__(self):
             self.counter = 0
@@ -71,24 +65,13 @@ def define_reset_states_class(nb_cuts):
     return ResetStatesCallback
 
 
-#################################################################
-# Function to define 'Callback computing validation loss' class #
-#################################################################
-# Callback to reset states are not properly called with validation data, as
-# noted by Philippe Remy in http://philipperemy.github.io/keras-stateful-lstm :
-# "be careful as it seems that the callbacks are not properly called when using
-# the parameter validation_data in model.fit(). You may have to do your
-# validation/testing manually by calling predict_on_batch() or
-# test_on_batch()."
-#
-# We introduce a callback to compute validation loss to circumvent this.
-# Result will looks like this:
-# Epoch 56/100 750/750 [======] - 1s - loss: 1.5133e-04     val_loss: 2.865e-04
 def batched(i, arr, batch_size):
+    """Helper function to get data in batches"""
     return (arr[i * batch_size:(i + 1) * batch_size])
 
 
 def test_on_batch_stateful(model, inputs, outputs, batch_size, nb_cuts):
+    """Helper function to test the model is stateful"""
     nb_batches = int(len(inputs) / batch_size)
     sum_pred = 0
     for i in range(nb_batches):
@@ -102,6 +85,19 @@ def test_on_batch_stateful(model, inputs, outputs, batch_size, nb_cuts):
 
 
 def define_stateful_val_loss_class(inputs, outputs, batch_size, nb_cuts):
+    """
+    Function to define 'Callback computing validation loss' class #
+    Callback to reset states are not properly called with validation data, as
+    noted by Philippe Remy in http://philipperemy.github.io/keras-stateful-lstm :
+    "be careful as it seems that the callbacks are not properly called when using
+    the parameter validation_data in model.fit(). You may have to do your
+    validation/testing manually by calling predict_on_batch() or
+    test_on_batch()."
+
+    We introduce a callback to compute validation loss to circumvent this.
+    Result will looks like this:
+    Epoch 56/100 750/750 [======] - 1s - loss: 1.5133e-04     val_loss: 2.865e-04
+    """
     class ValidationCallback(Callback):
         def __init__(self):
             self.val_loss = []
@@ -120,12 +116,14 @@ def define_stateful_val_loss_class(inputs, outputs, batch_size, nb_cuts):
 
 
 def get_data(data_path):
+    """Getting processed data"""
     df = pd.read_csv(data_path, index_col=[0])
     df = df.dropna(subset=['Lat_7_days', 'Lon_7_days', 'CPUE_7_days']).sort_values('Date')
     return df
 
 
 def data_initial_input_output(df, N, T):
+    """Preparing data for model input"""
     round_end = 3840
 
     # Inputs
@@ -143,6 +141,7 @@ def data_initial_input_output(df, N, T):
 
 
 def train_test_data(df, N, T):
+    """Splitting data to test/train datasets"""
     x1_f, x2_f, x3_f, x4_f, y1_f, y2_f, y3_f = data_initial_input_output(df, N, T)
 
     # Training/test sets
@@ -179,6 +178,7 @@ def train_test_data(df, N, T):
 
 
 def model_input_otputs(df, N, T, batch_size, t_after_cut):
+    """Preparing data in batches for model input"""
     x_train_f, x_test_f, y_train_f, y_test_f = train_test_data(df, N, T)
     inputs, outputs, inputs_test, outputs_test = [stateful_cut(arr, batch_size, t_after_cut) for arr in \
                                                   [x_train_f, y_train_f, x_test_f, y_test_f]]
@@ -187,6 +187,7 @@ def model_input_otputs(df, N, T, batch_size, t_after_cut):
 
 
 def lstm_model(batch_size, dim_in, dim_out):
+    """Setting up the model"""
     model = Sequential()
     model.add(LSTM(batch_input_shape=(batch_size, None, dim_in),
                    return_sequences=True, units=100, stateful=True))
@@ -197,6 +198,7 @@ def lstm_model(batch_size, dim_in, dim_out):
 
 
 def train_model(model, epochs, batch_size, N, T, t_after_cut, inputs, outputs, inputs_test, outputs_test):
+    """Training the stateful model"""
     # Model Training
     nb_reset = int(N / batch_size)
     nb_cuts = int(T / t_after_cut)
@@ -220,6 +222,7 @@ def train_model(model, epochs, batch_size, N, T, t_after_cut, inputs, outputs, i
 
 
 def predict(model, dim_in, dim_out, x_test_f, n):
+    """Predicting targets with the trained model"""
     # n = n # time series selected (between 0 and N-1)
     model_stateless = Sequential()
     model_stateless.add(LSTM(input_shape=(None, dim_in), return_sequences=True, units=100))
